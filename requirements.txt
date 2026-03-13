@@ -1,0 +1,22 @@
+# F1 Predictor - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Data
+fastf1>=3.3.0          # F1 telemetry and session data
+pandas>=2.0.0          # DataFrames and data manipulation
+numpy>=1.24.0          # Numerical computing
+
+# Machine Learning
+scikit-learn>=1.3.0    # ML models and evaluation
+
+# Visualization
+matplotlib>=3.7.0      # Static plots
+seaborn>=0.12.0        # Statistical visualizations
+plotly>=5.15.0         # Interactive plots
+
+# Dashboard (Phase 2)
+# streamlit>=1.28.0    # Uncomment when ready for dashboard
+
+# Development
+jupyter>=1.0.0         # Notebooks
+pytest>=7.4.0          # Testing
