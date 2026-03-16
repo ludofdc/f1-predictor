@@ -35,54 +35,28 @@ Se vedi `(venv)` prima del prompt, l'ambiente è attivo. ✅
 
 ---
 
-## Passo 2: Scarica i dati
+## Passo 2: Setup iniziale (solo la prima volta)
+
+Un solo comando scarica tutti i dati, calcola Elo, e costruisce le feature:
 
 ```bash
-python -m src.data_loader
+python commands.py
+# → Scegli 30 (Aggiorna stagione)
 ```
 
-Questo scarica i risultati di TUTTE le gare 2022-2025.
-La prima volta ci vogliono 5-15 minuti (fastf1 scarica parecchi dati).
-Le volte successive è istantaneo perché usa la cache.
+Questo fa automaticamente:
+1. Download risultati gare (2022-2026)
+2. Download dati avanzati (meteo, gomme, pit stop)
+3. Download dati prove libere (FP1/FP2/FP3)
+4. Calcolo Elo piloti e team
+5. Costruzione feature matrix completa
+
+La prima volta ci vogliono 15-20 minuti (fastf1 scarica parecchi dati).
+Le volte successive è molto più veloce perché usa la cache.
 
 ---
 
-## Passo 3: Calcola i rating Elo
-
-```bash
-python -m src.elo
-```
-
-Vedrai la classifica Elo attuale dei piloti. Controlla se ha senso:
-Verstappen dovrebbe essere in cima, i rookie più in basso.
-
----
-
-## Passo 4: Costruisci le feature
-
-```bash
-python -m src.feature_engineering
-```
-
-Questo crea il file `data/processed/features.csv` con tutte le
-feature pronte per il modello.
-
----
-
-## Passo 5: Allena e valuta il modello
-
-```bash
-python -m src.model
-```
-
-Vedrai:
-- I risultati della cross-validation (MAE per ogni fold)
-- La feature importance (quali fattori contano di più)
-- Una previsione di esempio sull'ultima gara
-
----
-
-## Passo 6: Esegui i test
+## Passo 3: Esegui i test
 
 ```bash
 pytest tests/ -v
@@ -92,7 +66,7 @@ Tutti i test devono passare. Se no, c'è un bug da fixare.
 
 ---
 
-## Passo 7: Pusha su GitHub
+## Passo 4: Pusha su GitHub
 
 ```bash
 git add .
@@ -102,23 +76,27 @@ git push origin main
 
 ---
 
-## Passo 8 (Opzionale): Esplora con i notebook
+## Uso quotidiano
 
-Apri VS Code, installa l'estensione "Jupyter", e crea notebook nella
-cartella `notebooks/` per esplorare i dati visivamente.
-
----
-
-## Struttura dei comandi da ricordare
+Dopo il setup iniziale, hai solo 2 comandi da ricordare:
 
 | Cosa vuoi fare                    | Comando                              |
 |-----------------------------------|--------------------------------------|
-| Scaricare dati                    | `python -m src.data_loader`          |
-| Calcolare Elo                     | `python -m src.elo`                  |
-| Creare feature                    | `python -m src.feature_engineering`  |
-| Allenare il modello               | `python -m src.model`                |
-| Eseguire i test                   | `pytest tests/ -v`                   |
-| Aggiornare con nuovi dati 2026    | Aggiungi 2026 a SEASONS in config.py |
+| **Aggiornare dati** (dopo ogni GP)  | `python commands.py` → opzione 26    |
+| **Prevedere un weekend**            | `python commands.py` → opzione 10    |
+
+### Previsioni weekend (comando 10)
+
+Ti chiede anno, round, e se usare i dati FP:
+- **Con FP** (default): usa i dati delle prove libere per previsioni migliori
+- **Senza FP**: usa solo storico + Elo (utile prima del weekend)
+
+Produce: qualifica prevista + gara prevista + confidence + PDF.
+
+### Aggiorna stagione (comando 30)
+
+Da usare dopo ogni weekend di gara per aggiornare tutto.
+Un solo comando, fa tutto automaticamente.
 
 ---
 

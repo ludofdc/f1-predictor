@@ -43,6 +43,7 @@ from config import (
     ELO_INITIAL_RATING,
     ELO_K_FACTOR,
     ELO_SCALE_FACTOR,
+    ELO_FP_BOOTSTRAP_SCALE,
     PROCESSED_DATA_DIR,
     REGULATION_RESET_YEARS,
 )
@@ -265,6 +266,42 @@ def compute_team_elo(df: pd.DataFrame) -> pd.DataFrame:
             and last_year_processed < year
         ):
             team_elo.reset_all_ratings()
+
+            # ── BOOTSTRAP FP ──
+            # A inizio nuova era, usiamo i dati FP del primo round
+            # per inizializzare l'Elo team con la gerarchia reale
+            # invece di lasciare tutti a 1500.
+            fp_summary_file = PROCESSED_DATA_DIR / "fp_summary.csv"
+            if fp_summary_file.exists():
+                fp_summary = pd.read_csv(fp_summary_file)
+                first_round_fp = fp_summary[fp_summary["year"] == year]
+                if not first_round_fp.empty:
+                    first_round_num = first_round_fp["round"].min()
+                    first_round_fp = first_round_fp[
+                        first_round_fp["round"] == first_round_num
+                    ]
+                    # Mapping driver→team dalla gara corrente
+                    driver_team = dict(
+                        zip(race_df["driver"], race_df["team"])
+                    )
+                    if "fp_best_lap_delta" in first_round_fp.columns:
+                        fp_with_team = first_round_fp.copy()
+                        fp_with_team["team"] = fp_with_team["driver"].map(
+                            driver_team
+                        )
+                        fp_with_team = fp_with_team.dropna(
+                            subset=["team", "fp_best_lap_delta"]
+                        )
+                        if not fp_with_team.empty:
+                            team_pace = fp_with_team.groupby("team")[
+                                "fp_best_lap_delta"
+                            ].mean()
+                            for team, delta in team_pace.items():
+                                boost = -delta * ELO_FP_BOOTSTRAP_SCALE
+                                team_elo.ratings[team] = (
+                                    ELO_INITIAL_RATING + boost
+                                )
+
         last_year_processed = year
 
         # Per ogni team, prendiamo la miglior posizione finale

@@ -85,6 +85,14 @@ ELO_K_FACTOR = 32
 # Significato: con 400 punti di differenza, il più forte ha ~91% di probabilità di vincere
 ELO_SCALE_FACTOR = 400
 
+# Scala per il bootstrap FP dell'Elo team a inizio era regolamentare.
+# A inizio nuova era (es. 2026), l'Elo team viene resettato a 1500.
+# Se ci sono dati FP del primo round, li usiamo per inizializzare
+# l'Elo team con una gerarchia realistica basata sul passo in pista.
+# Il valore converte il gap FP (secondi) in punti Elo:
+#   80 → 1 secondo di gap ≈ 80 punti Elo di differenza
+ELO_FP_BOOTSTRAP_SCALE = 80
+
 # ============================================================
 # PARAMETRI MODELLO
 # ============================================================

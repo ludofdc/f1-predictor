@@ -147,15 +147,36 @@ def test_team_elo_regulation_reset():
     assert 2026 in REGULATION_RESET_YEARS, "2026 deve essere in REGULATION_RESET_YEARS"
 
     # ── TEAM ELO: deve resettarsi nel 2026 ──
+    # Dopo il reset, l'Elo potrebbe essere 1500 (senza FP) oppure diverso
+    # se c'è un bootstrap FP. In ogni caso, l'Elo pre-2026 NON deve
+    # sopravvivere: verifichiamo che i valori di fine 2025 vengano cancellati.
     team_elo_history = compute_team_elo(df)
+
+    # Prendiamo l'Elo di fine 2025 (pre-race R2)
+    last_2025 = team_elo_history[
+        (team_elo_history["year"] == 2025) & (team_elo_history["round"] == 2)
+    ]
     first_2026_team = team_elo_history[
         (team_elo_history["year"] == 2026) & (team_elo_history["round"] == 1)
     ]
-    for _, row in first_2026_team.iterrows():
-        assert abs(row["team_elo_pre_race"] - ELO_INITIAL_RATING) < 0.01, (
-            f"Team {row['team']} Elo dovrebbe essere {ELO_INITIAL_RATING} "
-            f"nel 2026 (reset regolamento), ma è {row['team_elo_pre_race']}"
-        )
+
+    # Red Bull aveva vinto tutte le gare nel 2025, quindi il suo Elo 2025
+    # deve essere alto. Nel 2026 deve essere resettato (vicino a 1500 o
+    # inizializzato da FP, ma NON il valore alto di fine 2025).
+    rb_elo_2025 = last_2025[last_2025["team"] == "Red Bull Racing"][
+        "team_elo_pre_race"
+    ].iloc[0]
+    rb_elo_2026 = first_2026_team[first_2026_team["team"] == "Red Bull Racing"][
+        "team_elo_pre_race"
+    ].iloc[0]
+    # L'Elo 2025 di Red Bull è > 1500 (vincitore). Dopo il reset 2026
+    # deve essere sceso significativamente (reset + eventuale bootstrap FP).
+    assert rb_elo_2025 > ELO_INITIAL_RATING, (
+        "Red Bull nel 2025 dovrebbe avere Elo > 1500 (vincitore)"
+    )
+    assert rb_elo_2026 < rb_elo_2025, (
+        f"Red Bull Elo 2026 ({rb_elo_2026:.1f}) deve essere < 2025 ({rb_elo_2025:.1f}) dopo reset"
+    )
 
     # ── Verifica che nel 2025 i team NON siano tutti a 1500 ──
     # (dopo 2 gare nel 2025, i rating devono essere diversi da 1500)
@@ -196,6 +217,108 @@ def test_team_elo_regulation_reset():
         f"VER Elo NON deve resettarsi nel 2026: atteso >{ELO_INITIAL_RATING}, "
         f"ottenuto {ver_elo_in_2026}"
     )
+
+
+def test_team_elo_fp_bootstrap():
+    """A inizio era regolamentare, l'Elo team deve essere inizializzato
+    usando i dati FP del primo round (bootstrap), non restare a 1500."""
+    import pandas as pd
+    import os
+    from src.elo import compute_team_elo
+    from config import (
+        REGULATION_RESET_YEARS,
+        ELO_INITIAL_RATING,
+        ELO_FP_BOOTSTRAP_SCALE,
+        PROCESSED_DATA_DIR,
+    )
+
+    # Creiamo un fp_summary.csv temporaneo con delta FP diversi per team
+    fp_file = PROCESSED_DATA_DIR / "fp_summary.csv"
+    fp_backup = None
+    if fp_file.exists():
+        fp_backup = pd.read_csv(fp_file)
+
+    # FP finti: Mercedes veloce (delta=0.1), Ferrari media (0.5), Red Bull lenta (1.0)
+    fp_data = pd.DataFrame([
+        {"year": 2026, "round": 1, "driver": "HAM", "fp_best_lap_delta": 0.1},
+        {"year": 2026, "round": 1, "driver": "RUS", "fp_best_lap_delta": 0.1},
+        {"year": 2026, "round": 1, "driver": "LEC", "fp_best_lap_delta": 0.5},
+        {"year": 2026, "round": 1, "driver": "SAI", "fp_best_lap_delta": 0.5},
+        {"year": 2026, "round": 1, "driver": "VER", "fp_best_lap_delta": 1.0},
+        {"year": 2026, "round": 1, "driver": "PER", "fp_best_lap_delta": 1.0},
+    ])
+    fp_data.to_csv(fp_file, index=False)
+
+    try:
+        # Dati gara finti: 2025 + 2026
+        rows = []
+        for year in [2025, 2026]:
+            for rnd in [1, 2]:
+                for driver, team, pos in [
+                    ("HAM", "Mercedes", 1),
+                    ("RUS", "Mercedes", 2),
+                    ("LEC", "Ferrari", 3),
+                    ("SAI", "Ferrari", 4),
+                    ("VER", "Red Bull Racing", 5),
+                    ("PER", "Red Bull Racing", 6),
+                ]:
+                    rows.append({
+                        "year": year, "round": rnd,
+                        "race_name": f"Test GP R{rnd}",
+                        "driver": driver, "team": team,
+                        "grid_position": pos, "finish_position": pos,
+                        "dnf": False,
+                    })
+        df = pd.DataFrame(rows)
+
+        assert 2026 in REGULATION_RESET_YEARS
+
+        team_elo_history = compute_team_elo(df)
+        first_2026 = team_elo_history[
+            (team_elo_history["year"] == 2026)
+            & (team_elo_history["round"] == 1)
+        ]
+
+        # Mercedes (delta=0.1) deve avere Elo > Ferrari (delta=0.5) > Red Bull (delta=1.0)
+        merc_elo = first_2026[first_2026["team"] == "Mercedes"][
+            "team_elo_pre_race"
+        ].iloc[0]
+        ferrari_elo = first_2026[first_2026["team"] == "Ferrari"][
+            "team_elo_pre_race"
+        ].iloc[0]
+        rb_elo = first_2026[first_2026["team"] == "Red Bull Racing"][
+            "team_elo_pre_race"
+        ].iloc[0]
+
+        # Verifica gerarchia
+        assert merc_elo > ferrari_elo, (
+            f"Mercedes ({merc_elo:.1f}) dovrebbe avere Elo > Ferrari ({ferrari_elo:.1f})"
+        )
+        assert ferrari_elo > rb_elo, (
+            f"Ferrari ({ferrari_elo:.1f}) dovrebbe avere Elo > Red Bull ({rb_elo:.1f})"
+        )
+
+        # Verifica che NON siano tutti 1500
+        assert merc_elo != ELO_INITIAL_RATING, (
+            "Con bootstrap FP, Mercedes non dovrebbe essere a 1500"
+        )
+
+        # Verifica valori attesi
+        expected_merc = ELO_INITIAL_RATING + (-0.1 * ELO_FP_BOOTSTRAP_SCALE)
+        expected_rb = ELO_INITIAL_RATING + (-1.0 * ELO_FP_BOOTSTRAP_SCALE)
+        assert abs(merc_elo - expected_merc) < 0.01, (
+            f"Mercedes Elo atteso {expected_merc}, ottenuto {merc_elo}"
+        )
+        assert abs(rb_elo - expected_rb) < 0.01, (
+            f"Red Bull Elo atteso {expected_rb}, ottenuto {rb_elo}"
+        )
+
+    finally:
+        # Ripristina fp_summary.csv originale
+        if fp_backup is not None:
+            fp_backup.to_csv(fp_file, index=False)
+        elif fp_file.exists():
+            os.remove(fp_file)
 
 
 if __name__ == "__main__":

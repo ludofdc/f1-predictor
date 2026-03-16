@@ -641,13 +641,18 @@ def fp_weekend_analysis(year: int, round_num: int):
 # 3c. PREVISIONI WEEKEND (QUALIFICA + GARA + CONFIDENCE)
 # ============================================================
 
-def predict_weekend(year: int, round_num: int):
+def predict_weekend(year: int, round_num: int, use_fp: bool = True):
     """
     Previsione completa del weekend: qualifica E gara.
 
     Produce due tabelle:
     1. QUALIFICA PREVISTA — chi sarà in pole, top 3, ecc.
     2. GARA PREVISTA — classifica prevista con confidence
+
+    Parametri:
+    - use_fp: se True (default), usa i dati FP se disponibili per
+      migliorare la previsione con ensemble FP + storico.
+      Se False, usa solo dati storici + Elo.
 
     La confidence viene calcolata così:
     - Il modello Random Forest è un ensemble di 200 alberi
@@ -657,6 +662,7 @@ def predict_weekend(year: int, round_num: int):
     - Alta varianza = bassa confidence (molti scenari possibili)
 
     Uso: predict_weekend(2024, 5)
+         predict_weekend(2024, 5, use_fp=False)
     """
     features = _load_features()
 
@@ -713,6 +719,10 @@ def predict_weekend(year: int, round_num: int):
     if len(fp_values) > 0:
         unique_vals = fp_values.dropna().nunique()
         has_real_fp = unique_vals > 1
+
+    # Se use_fp=False, forziamo a non usare FP
+    if not use_fp:
+        has_real_fp = False
 
     if not has_real_fp:
         w_fp = 0.0
@@ -1042,7 +1052,9 @@ def predict_weekend(year: int, round_num: int):
         print(f"\n  🔴 Modello INCERTO — alta variabilità, prendere con cautela")
 
     # Nota FP
-    if has_real_fp and w_fp > 0:
+    if not use_fp:
+        print(f"  ℹ️  FP disabilitate dall'utente — previsione basata solo su storico e Elo")
+    elif has_real_fp and w_fp > 0:
         print(f"  ℹ️  Dati FP reali disponibili — peso FP: {w_fp*100:.0f}%")
         print(f"     Ensemble: modello FP+Pilota ({w_fp*100:.0f}%) + modello completo ({(1-w_fp)*100:.0f}%)")
     elif has_real_fp:
@@ -1050,6 +1062,66 @@ def predict_weekend(year: int, round_num: int):
     else:
         print(f"  ℹ️  Dati FP non disponibili — basato solo su storico e Elo")
     has_fp = has_real_fp
+
+    # =======================================================
+    # INDICATORI WEEKEND (analisi FP dettagliata)
+    # =======================================================
+    if has_real_fp and use_fp:
+        print(f"\n{'─' * 75}")
+        print(f"📊 INDICATORI WEEKEND (dati FP)")
+        print(f"{'─' * 75}")
+
+        # Best laps, long run, consistency dalle feature
+        fp_indicators = {
+            "fp_best_lap_delta": "Più veloce in FP (best lap)",
+            "fp2_long_run_deg": "Minor degradazione FP2 (long run)",
+            "fp_long_run_consistency": "Più costante (long run)",
+        }
+        for col, label in fp_indicators.items():
+            if col in race_data.columns:
+                valid = race_data[[col, "driver"]].dropna(subset=[col])
+                if not valid.empty:
+                    best_driver = valid.loc[valid[col].idxmin(), "driver"]
+                    best_val = valid[col].min()
+                    print(f"  {label}: {best_driver} ({best_val:.3f})")
+
+        # Analisi dettagliata FP da fp_data.csv se disponibile
+        fp_file = PROCESSED_DATA_DIR / "fp_data.csv"
+        if fp_file.exists():
+            fp_data = pd.read_csv(fp_file)
+            weekend_fp = fp_data[(fp_data["year"] == year) & (fp_data["round"] == round_num)]
+
+            if not weekend_fp.empty:
+                for session in ["FP1", "FP2", "FP3"]:
+                    sess_data = weekend_fp[weekend_fp["session"] == session]
+                    if sess_data.empty:
+                        continue
+
+                    print(f"\n  --- {session} ---")
+
+                    # Best laps top 5
+                    if "best_lap" in sess_data.columns:
+                        top = sess_data.nsmallest(5, "best_lap")
+                        leader_time = top["best_lap"].iloc[0]
+                        print(f"  {'Pos':>3s}  {'Pilota':<5s}  {'Best Lap':>9s}  {'Gap':>7s}")
+                        for i, (_, row) in enumerate(top.iterrows()):
+                            gap = row["best_lap"] - leader_time
+                            gap_str = f"+{gap:.3f}" if gap > 0 else "LEADER"
+                            mins = int(row["best_lap"] // 60)
+                            secs = row["best_lap"] % 60
+                            print(f"  {i+1:3d}  {row['driver']:<5s}  {mins}:{secs:06.3f}  {gap_str:>7s}")
+
+                    # Long run top 5 (se disponibili)
+                    lr_data = sess_data[sess_data["long_run_pace"].notna()]
+                    if not lr_data.empty:
+                        print(f"\n  Long Run ({session}):")
+                        print(f"  {'Pilota':<5s}  {'Pace':>8s}  {'Deg':>7s}  {'Consist':>8s}")
+                        for _, row in lr_data.nsmallest(5, "long_run_pace").iterrows():
+                            deg_str = f"{row['long_run_deg']:.3f}" if pd.notna(row.get('long_run_deg')) else "n/a"
+                            cons_str = f"{row['long_run_consistency']:.3f}" if pd.notna(row.get('long_run_consistency')) else "n/a"
+                            mins = int(row["long_run_pace"] // 60)
+                            secs = row["long_run_pace"] % 60
+                            print(f"  {row['driver']:<5s}  {mins}:{secs:06.3f}  {deg_str:>7s}  {cons_str:>8s}")
 
     # =======================================================
     # GENERA PDF
@@ -1352,6 +1424,15 @@ def _generate_weekend_pdf(
         ax_s.text(5, 1.0, verdict, fontsize=15, fontweight="bold",
                   color=bar_color, ha="center", va="center",
                   fontfamily="monospace")
+
+        # Postilla: fonte dati (con o senza FP)
+        if has_fp:
+            nota = "Previsioni generate con dati Prove Libere (FP) + storico Elo"
+        else:
+            nota = "Previsioni generate SENZA dati Prove Libere — solo storico Elo"
+        ax_s.text(5, 0.15, nota, fontsize=9, color="#888888",
+                  ha="center", va="center", fontfamily="monospace",
+                  style="italic")
 
         plt.tight_layout(pad=0.5)
         pdf.savefig(fig_s, facecolor=DARK_BG)
@@ -1871,7 +1952,7 @@ def scarica_fp_storici():
     predittive della posizione finale. Il download include ~92 gare × 3
     sessioni, ci vuole un po' ma va fatto una volta sola.
 
-    Dopo il download, usa l'opzione 30 (Aggiorna stagione) per ricostruire
+    Dopo il download, usa l'opzione 26 (Aggiorna stagione) per ricostruire
     le feature con i dati FP inclusi.
     """
     print(f"\n{'=' * 60}")
@@ -1879,13 +1960,13 @@ def scarica_fp_storici():
     print(f"{'=' * 60}")
     print(f"  Questo scarica FP1/FP2/FP3 per tutte le gare disponibili.")
     print(f"  Ci vuole tempo (~10-15 minuti) ma va fatto una volta sola.")
-    print(f"  Dopo il download, usa opzione 30 per ricostruire le feature.\n")
+    print(f"  Dopo il download, usa opzione 26 per ricostruire le feature.\n")
 
     try:
         from src.fp_data_loader import download_fp_data
         download_fp_data(force=True)
         print(f"\n  ✅ Download completato!")
-        print(f"  ℹ️  Ora usa opzione 30 per ricostruire le feature con i dati FP.")
+        print(f"  ℹ️  Ora usa opzione 26 per ricostruire le feature con i dati FP.")
     except Exception as e:
         print(f"\n  ❌ Errore: {e}")
         print(f"  Riprova più tardi (potrebbe essere un limite API).")
@@ -1915,12 +1996,8 @@ if __name__ == "__main__":
 ║    9.  Testa a testa                                     ║
 ║                                                          ║
 ║  PREVISIONI:                                             ║
-║   10.  Prevedi una gara specifica                        ║
+║   10.  🏁 Prevedi weekend (quali + gara + confidence)    ║
 ║   11.  Simula un'intera stagione                         ║
-║   22.  Prevedi con dati FP (pre-gara)                    ║
-║   23.  Prevedi prossima gara (auto-detect FP)            ║
-║   24.  Analisi weekend FP                                ║
-║   29.  🏁 PREVISIONI WEEKEND (quali + gara + confidence) ║
 ║                                                          ║
 ║  WHAT-IF:                                                ║
 ║   12.  Cambia griglia di partenza                        ║
@@ -1939,14 +2016,14 @@ if __name__ == "__main__":
 ║   21.  Analisi strategia pit stop                        ║
 ║                                                          ║
 ║  GRAFICI FP:                                             ║
-║   25.  Long run box plots (singola FP)                   ║
-║   26.  Long run traces / degradazione                    ║
-║   27.  Telemetria top 3 best laps                        ║
-║   28.  Tutti i grafici del weekend                       ║
+║   22.  Long run box plots (singola FP)                   ║
+║   23.  Long run traces / degradazione                    ║
+║   24.  Telemetria top 3 best laps                        ║
+║   25.  Tutti i grafici del weekend                       ║
 ║                                                          ║
 ║  AGGIORNAMENTO:                                          ║
-║   30.  🔄 Aggiorna stagione (scarica + ricostruisci)     ║
-║   31.  📥 Scarica dati FP storici (2022-2026)            ║
+║   26.  🔄 Aggiorna stagione (scarica + ricostruisci)     ║
+║   27.  📥 Scarica dati FP storici (2022-2026)            ║
 ║                                                          ║
 ║  0. Esci                                                 ║
 ╚══════════════════════════════════════════════════════════╝
@@ -1987,7 +2064,9 @@ if __name__ == "__main__":
         elif choice == 10:
             y = int(input("  Anno: "))
             r = int(input("  Round: "))
-            predict_specific_race(y, r)
+            fp_input = input("  Includere dati FP? (S/n, default=sì): ").strip().lower()
+            use_fp = fp_input not in ("n", "no")
+            predict_weekend(y, r, use_fp=use_fp)
         elif choice == 11:
             y = int(input("  Anno: "))
             simulate_season(y)
@@ -2003,39 +2082,25 @@ if __name__ == "__main__":
         elif choice == 20:
             d = input("  Codice pilota (es. LEC): ").strip().upper()
             driver_circuit_specialist(d)
-        elif choice == 22:
-            y = int(input("  Anno: "))
-            r = int(input("  Round: "))
-            predict_with_fp(y, r)
-        elif choice == 23:
-            predict_next_race()
-        elif choice == 24:
-            y = int(input("  Anno: "))
-            r = int(input("  Round: "))
-            fp_weekend_analysis(y, r)
-        elif choice == 29:
-            y = int(input("  Anno: "))
-            r = int(input("  Round: "))
-            predict_weekend(y, r)
-        elif choice in [25, 26, 27, 28]:
+        elif choice in [22, 23, 24, 25]:
             if not FP_PLOTS:
                 print("❌ Modulo grafici non disponibile. Controlla le dipendenze.")
             else:
                 y = int(input("  Anno: "))
                 r = int(input("  Round: "))
-                if choice == 28:
+                if choice == 25:
                     plot_fp_weekend(y, r, save=True, show=True)
                 else:
                     s = input("  Sessione (FP1/FP2/FP3, default FP2): ").strip().upper() or "FP2"
-                    if choice == 25:
+                    if choice == 22:
                         plot_long_runs(y, r, s, save=True, show=True)
-                    elif choice == 26:
+                    elif choice == 23:
                         plot_long_run_traces(y, r, s, save=True, show=True)
-                    elif choice == 27:
+                    elif choice == 24:
                         plot_telemetry_top3(y, r, s, save=True, show=True)
-        elif choice == 30:
+        elif choice == 26:
             aggiorna_stagione()
-        elif choice == 31:
+        elif choice == 27:
             scarica_fp_storici()
         elif choice in simple_commands:
             simple_commands[choice]()
