@@ -233,6 +233,7 @@ def test_team_elo_fp_bootstrap():
     )
 
     # Creiamo un fp_summary.csv temporaneo con delta FP diversi per team
+    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
     fp_file = PROCESSED_DATA_DIR / "fp_summary.csv"
     fp_backup = None
     if fp_file.exists():
