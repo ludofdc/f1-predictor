@@ -8,7 +8,14 @@
       "Bash(python3:*)",
       "Bash(wc:*)",
       "Bash(grep:*)",
-      "WebFetch(domain:www.formula1.com)"
+      "WebFetch(domain:www.formula1.com)",
+      "Bash(tree:*)",
+      "Bash(/Users/ludovicofeciadicossato/Desktop/GitHub/f1-predictor/venv/bin/python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: semplifica previsioni + bootstrap Elo team da FP a inizio era\n\n- Unifica 5 comandi previsione \\(10/22/23/24/29\\) in un solo comando 10\n  con parametro use_fp per includere/escludere dati prove libere\n- Rinumera menu da 1 a 27 senza buchi\n- Aggiunge postilla nel PDF che indica se previsioni con o senza FP\n- Implementa bootstrap Elo team da dati FP a inizio era regolamentare:\n  a inizio 2026 l''Elo team viene inizializzato dalla gerarchia FP\n  del primo round invece di partire tutti da 1500\n- Aggiorna SETUP_GUIDE con flusso semplificato \\(2 comandi da ricordare\\)\n- Aggiunge test per bootstrap FP e aggiorna test reset regolamento\n\nCo-Authored-By: Claude \\(claude-opus-4-6\\) <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(gh run list:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
