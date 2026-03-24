@@ -263,13 +263,17 @@ def _build_race_calendar() -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
-def download_fp_data(force: bool = False):
+def download_fp_data(force: bool = False, incremental: bool = False):
     """
     Funzione principale: scarica i dati FP1, FP2, FP3 per tutte le gare.
 
     Salva i file:
     - fp_data.csv: tutti i dati FP per sessione/pilota/gara
     - fp_summary.csv: riepilogo aggregato per pilota/gara (media delle 3 sessioni)
+
+    Parametri:
+        force: se True, riscarica tutto da zero
+        incremental: se True, scarica solo le gare mancanti e appende ai CSV esistenti
     """
     setup_cache()
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -277,16 +281,39 @@ def download_fp_data(force: bool = False):
     fp_file = PROCESSED_DATA_DIR / "fp_data.csv"
     summary_file = PROCESSED_DATA_DIR / "fp_summary.csv"
 
-    if not force and fp_file.exists():
+    if not force and not incremental and fp_file.exists():
         print("📂 Dati FP già presenti. Usa force=True per riscaricare.")
         return
 
-    print("🔄 Download dati Prove Libere (FP1, FP2, FP3)...")
-    print("   ⏱️ Questo richiede parecchio tempo — 3 sessioni per gara.\n")
-
     # Carichiamo il calendario
-    # Usiamo due fonti: all_races.csv (gare già avvenute) + calendario fastf1 (gare future)
     race_list = _build_race_calendar()
+
+    # === MODALITÀ INCREMENTALE ===
+    existing_fp_races = set()
+    if incremental and not force and fp_file.exists():
+        existing_fp = pd.read_csv(fp_file)
+        existing_fp_races = set(
+            zip(existing_fp["year"].astype(int), existing_fp["round"].astype(int))
+        )
+
+        # Filtra solo gare mancanti
+        race_list_filtered = race_list[
+            ~race_list.apply(
+                lambda r: (int(r["year"]), int(r["round"])) in existing_fp_races,
+                axis=1
+            )
+        ]
+
+        if race_list_filtered.empty:
+            print("   ✅ Dati FP già aggiornati! Nessuna gara nuova.")
+            return
+
+        print(f"🔄 Download INCREMENTALE dati FP: {len(race_list_filtered)} gare nuove "
+              f"(skip {len(existing_fp_races)} già in cache)")
+        race_list = race_list_filtered
+    else:
+        print("🔄 Download dati Prove Libere (FP1, FP2, FP3)...")
+        print("   ⏱️ Questo richiede parecchio tempo — 3 sessioni per gara.\n")
 
     all_fp = []
 
@@ -312,19 +339,31 @@ def download_fp_data(force: bool = False):
             time.sleep(0.3)
 
     if not all_fp:
-        print("❌ Nessun dato FP scaricato!")
+        if incremental and not force:
+            print("   ✅ Nessun nuovo dato FP trovato.")
+        else:
+            print("❌ Nessun dato FP scaricato!")
         return
 
-    # Concatena e calcola metriche relative
-    fp_full = pd.concat(all_fp, ignore_index=True)
+    # Concatena nuovi dati
+    new_fp = pd.concat(all_fp, ignore_index=True)
+
+    # In modalità incrementale: appendi ai dati esistenti
+    if incremental and not force and fp_file.exists():
+        existing_fp = pd.read_csv(fp_file)
+        fp_full = pd.concat([existing_fp, new_fp], ignore_index=True)
+        print(f"\n   +{len(new_fp)} righe FP nuove")
+    else:
+        fp_full = new_fp
+
+    # Calcola metriche relative su TUTTO il dataset
     fp_full = _compute_relative_metrics(fp_full)
 
     # Salva dati dettagliati
     fp_full.to_csv(fp_file, index=False)
-    print(f"\n💾 Dati FP dettagliati: {len(fp_full)} righe → {fp_file}")
+    print(f"💾 Dati FP dettagliati: {len(fp_full)} righe totali → {fp_file}")
 
-    # === CREA SUMMARY AGGREGATO ===
-    # Per ogni gara + pilota: combina FP1, FP2, FP3 in metriche uniche
+    # === CREA SUMMARY AGGREGATO (ricalcola su tutto, è locale e veloce) ===
     summary = _create_fp_summary(fp_full)
     summary.to_csv(summary_file, index=False)
     print(f"💾 Summary FP: {len(summary)} righe → {summary_file}")

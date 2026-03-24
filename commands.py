@@ -963,9 +963,16 @@ def predict_weekend(year: int, round_num: int, use_fp: bool = True):
         quali_df["quali_confidence"] = confidence_quali
         quali_df = quali_df.sort_values("quali_predicted").reset_index(drop=True)
 
+        # Se la gara non è ancora avvenuta, grid_position è solo un input (dalla qualifica),
+        # NON un risultato reale verificato → non mostrarlo come "REALE"
+        is_future_race = quali_df["finish_position"].isna().all()
+
         for i, (_, row) in enumerate(quali_df.iterrows()):
             pos = i + 1
-            real_grid = int(row["grid_position"]) if pd.notna(row.get("grid_position")) else "?"
+            if is_future_race:
+                real_grid = "?"
+            else:
+                real_grid = int(row["grid_position"]) if pd.notna(row.get("grid_position")) else "?"
             conf = row["quali_confidence"]
 
             # Barra confidence
@@ -977,8 +984,8 @@ def predict_weekend(year: int, round_num: int, use_fp: bool = True):
                 f"  {conf_bar} {conf:.0f}%"
             )
 
-        # Accuracy qualifica
-        if quali_df["grid_position"].notna().any():
+        # Accuracy qualifica (solo se abbiamo dati reali post-gara)
+        if not is_future_race and quali_df["grid_position"].notna().any():
             mae_q = abs(quali_df["quali_predicted"] - quali_df["grid_position"]).mean()
             top3_real = set(quali_df.nsmallest(3, "grid_position")["driver"])
             top3_pred = set(quali_df.head(3)["driver"])
@@ -1268,9 +1275,14 @@ def _generate_weekend_pdf(
                 pred_val = row["quali_predicted"]
                 ax.text(x_pos[3], y, f"P{pred_val:.1f}", fontsize=9,
                         color=TEXT_CLR, va="center", fontfamily="monospace")
-                # Reale
-                real_grid = row.get("grid_position", None)
-                real_str = f"P{int(real_grid)}" if pd.notna(real_grid) else "?"
+                # Reale — se la gara è futura (finish_position tutta NaN),
+                # grid_position è solo un input, non un dato reale verificato
+                is_future = df["finish_position"].isna().all()
+                if is_future:
+                    real_str = "?"
+                else:
+                    real_grid = row.get("grid_position", None)
+                    real_str = f"P{int(real_grid)}" if pd.notna(real_grid) else "?"
                 ax.text(x_pos[4], y, real_str, fontsize=9,
                         color=TEXT_CLR, va="center", fontfamily="monospace")
                 # Confidence
@@ -1322,8 +1334,9 @@ def _generate_weekend_pdf(
             _draw_table(ax_q, quali_df, f"📋 QUALIFICA PREVISTA — {race_name} {year}",
                         is_quali=True)
 
-            # Accuracy qualifica in fondo
-            if quali_df["grid_position"].notna().any():
+            # Accuracy qualifica in fondo (solo se gara già corsa — dati reali disponibili)
+            is_future_pdf = quali_df["finish_position"].isna().all()
+            if not is_future_pdf and quali_df["grid_position"].notna().any():
                 mae_q = abs(quali_df["quali_predicted"] - quali_df["grid_position"]).mean()
                 top3_real = set(quali_df.nsmallest(3, "grid_position")["driver"])
                 top3_pred = set(quali_df.head(3)["driver"])
@@ -1820,54 +1833,59 @@ def aggiorna_stagione():
     Aggiorna tutti i dati della stagione corrente in un solo comando.
 
     Esegue in ordine:
-    1. Download risultati gare (force)
-    2. Download dati avanzati (giri, meteo, pit stop)
-    3. Download dati prove libere (FP1/FP2/FP3)
+    1. Download risultati gare (INCREMENTALE — solo gare nuove/mancanti)
+    2. Download dati avanzati (INCREMENTALE — solo gare nuove)
+    3. Download dati prove libere (INCREMENTALE — solo gare nuove)
     4. Ricalcolo Elo piloti e team (con reset regolamento se necessario)
     5. Ricostruzione feature matrix avanzata
 
     Tutto viene salvato nei file CSV in data/processed/.
+
+    NOTA: Usa l'aggiornamento incrementale per scaricare SOLO le gare
+    nuove/mancanti, evitando di riscaricare ~660 sessioni ogni volta.
+    Elo e features vengono sempre ricalcolati su tutto il dataset.
     """
     import time
     from config import SEASONS, REGULATION_RESET_YEARS
 
     print("\n" + "=" * 60)
-    print("🔄 AGGIORNAMENTO STAGIONE COMPLETO")
+    print("🔄 AGGIORNAMENTO STAGIONE (INCREMENTALE)")
     print("=" * 60)
     print(f"  Stagioni configurate: {SEASONS}")
     print(f"  Reset regolamento: {REGULATION_RESET_YEARS}")
+    print(f"  ⚡ Modalità: scarica SOLO gare nuove/mancanti")
     start_time = time.time()
 
-    # Step 1: Download risultati gare
-    print(f"\n📥 STEP 1/5: Download risultati gare...")
+    # Step 1: Download risultati gare (incrementale)
+    print(f"\n📥 STEP 1/5: Download risultati gare (incrementale)...")
     print("-" * 40)
     try:
-        df = load_all_data(force_download=True)
+        df = load_all_data(incremental=True)
         print(f"  ✅ {len(df)} righe caricate ({df.groupby(['year','round']).ngroups} gare)")
     except Exception as e:
         print(f"  ❌ Errore download gare: {e}")
         return
 
-    # Step 2: Download dati avanzati (meteo, gomme, pit stop)
-    print(f"\n📥 STEP 2/5: Download dati avanzati (meteo, gomme, pit stop)...")
+    # Step 2: Download dati avanzati (incrementale)
+    print(f"\n📥 STEP 2/5: Download dati avanzati (incrementale)...")
     print("-" * 40)
     try:
         from src.advanced_data_loader import download_advanced_data
-        download_advanced_data(force=True)
-        print(f"  ✅ Dati avanzati scaricati")
+        download_advanced_data(incremental=True)
+        print(f"  ✅ Dati avanzati aggiornati")
     except ImportError:
         print(f"  ⚠️ Modulo advanced_data_loader non trovato. Saltato.")
     except Exception as e:
         print(f"  ⚠️ Errore dati avanzati: {e}")
         print(f"     Continuo senza dati avanzati...")
 
-    # Step 3: Download dati FP
-    print(f"\n📥 STEP 3/5: Download dati prove libere...")
+    # Step 3: Download dati FP (incrementale)
+    print(f"\n📥 STEP 3/5: Download dati prove libere (incrementale)...")
     print("-" * 40)
     try:
         from src.fp_data_loader import download_fp_data
-        download_fp_data(force=True)
-        print(f"  ✅ Dati FP scaricati")
+        download_fp_data(incremental=True)
+        print(f"  ✅ Dati FP aggiornati")
     except ImportError:
         print(f"  ⚠️ Modulo fp_data_loader non trovato. Saltato.")
     except Exception as e:
@@ -2064,7 +2082,7 @@ if __name__ == "__main__":
         elif choice == 10:
             y = int(input("  Anno: "))
             r = int(input("  Round: "))
-            fp_input = input("  Includere dati FP? (S/n, default=sì): ").strip().lower()
+            fp_input = input("  Includere dati FP? (sì/no, premi Invio per sì): ").strip().lower()
             use_fp = fp_input not in ("n", "no")
             predict_weekend(y, r, use_fp=use_fp)
         elif choice == 11:

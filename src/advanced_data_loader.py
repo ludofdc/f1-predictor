@@ -241,7 +241,7 @@ def compute_tyre_degradation(laps_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(degradation_records)
 
 
-def download_advanced_data(force: bool = False):
+def download_advanced_data(force: bool = False, incremental: bool = False):
     """
     Funzione principale: scarica tutti i dati avanzati.
 
@@ -250,6 +250,10 @@ def download_advanced_data(force: bool = False):
     2. weather.csv — meteo di ogni gara
     3. pit_stops.csv — pit stop di ogni pilota per ogni gara
     4. tyre_degradation.csv — degradazione gomme per stint
+
+    Parametri:
+        force: se True, riscarica tutto da zero
+        incremental: se True, scarica solo le gare mancanti e appende ai CSV esistenti
     """
     setup_cache()
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -259,13 +263,10 @@ def download_advanced_data(force: bool = False):
     pits_file = PROCESSED_DATA_DIR / "pit_stops.csv"
     deg_file = PROCESSED_DATA_DIR / "tyre_degradation.csv"
 
-    # Controlla se esiste già (a meno che non forziamo)
-    if not force and all(f.exists() for f in [laps_file, weather_file, pits_file]):
+    # Controlla se esiste già (a meno che non forziamo o incrementale)
+    if not force and not incremental and all(f.exists() for f in [laps_file, weather_file, pits_file]):
         print("📂 Dati avanzati già presenti. Usa force=True per riscaricare.")
         return
-
-    print("🔄 Download dati avanzati (giri, meteo, pit stop)...")
-    print("   ⏱️ Questo richiede tempo — ci sono molti dati per gara.\n")
 
     # Carichiamo il calendario da all_races.csv per sapere quali gare scaricare
     races_file = PROCESSED_DATA_DIR / "all_races.csv"
@@ -274,11 +275,50 @@ def download_advanced_data(force: bool = False):
         return
 
     races_df = pd.read_csv(races_file)
+    # Escludi gare non ancora corse (non hanno dati avanzati)
+    if "status" in races_df.columns:
+        races_with_results = races_df[races_df["status"] != "Not Yet Raced"]
+    else:
+        races_with_results = races_df
     race_list = (
-        races_df.groupby(["year", "round"])["race_name"]
+        races_with_results.groupby(["year", "round"])["race_name"]
         .first()
         .reset_index()
     )
+
+    # === MODALITÀ INCREMENTALE ===
+    existing_races_adv = set()
+    if incremental and not force:
+        # Trova le gare già presenti nei CSV avanzati
+        if laps_file.exists():
+            existing_laps = pd.read_csv(laps_file)
+            existing_races_adv = set(
+                zip(existing_laps["year"].astype(int), existing_laps["round"].astype(int))
+            )
+        elif weather_file.exists():
+            existing_weather = pd.read_csv(weather_file)
+            existing_races_adv = set(
+                zip(existing_weather["year"].astype(int), existing_weather["round"].astype(int))
+            )
+
+        # Filtra solo gare mancanti
+        race_list_filtered = race_list[
+            ~race_list.apply(
+                lambda r: (int(r["year"]), int(r["round"])) in existing_races_adv,
+                axis=1
+            )
+        ]
+
+        if race_list_filtered.empty:
+            print("   ✅ Dati avanzati già aggiornati! Nessuna gara nuova.")
+            return
+
+        print(f"🔄 Download INCREMENTALE dati avanzati: {len(race_list_filtered)} gare nuove "
+              f"(skip {len(existing_races_adv)} già in cache)")
+        race_list = race_list_filtered
+    else:
+        print("🔄 Download dati avanzati (giri, meteo, pit stop)...")
+        print("   ⏱️ Questo richiede tempo — ci sono molti dati per gara.\n")
 
     all_laps = []
     all_weather = []
@@ -319,27 +359,49 @@ def download_advanced_data(force: bool = False):
         # Pausa breve per non sovraccaricare l'API
         time.sleep(0.5)
 
-    # Salviamo tutto
-    if all_laps:
-        laps_full = pd.concat(all_laps, ignore_index=True)
-        laps_full.to_csv(laps_file, index=False)
-        print(f"\n💾 Laps: {len(laps_full)} righe → {laps_file}")
+    # === SALVATAGGIO ===
+    # In modalità incrementale: appendi ai file esistenti
+    # In modalità force/prima volta: scrivi da zero
 
-        # Calcoliamo la degradazione
+    if all_laps:
+        new_laps = pd.concat(all_laps, ignore_index=True)
+        if incremental and not force and laps_file.exists():
+            existing_laps = pd.read_csv(laps_file)
+            laps_full = pd.concat([existing_laps, new_laps], ignore_index=True)
+        else:
+            laps_full = new_laps
+        laps_full.to_csv(laps_file, index=False)
+        print(f"\n💾 Laps: {len(laps_full)} righe totali → {laps_file}")
+        if incremental and not force:
+            print(f"   (+{len(new_laps)} nuove)")
+
+        # Ricalcoliamo la degradazione su TUTTO il dataset (è locale, veloce)
         print("📊 Calcolo degradazione gomme...")
         deg_df = compute_tyre_degradation(laps_full)
         deg_df.to_csv(deg_file, index=False)
         print(f"💾 Degradazione: {len(deg_df)} stint → {deg_file}")
+    elif incremental and not force and not all_laps:
+        pass  # Nessun nuovo lap, niente da fare
 
     if all_weather:
-        weather_full = pd.DataFrame(all_weather)
+        new_weather = pd.DataFrame(all_weather)
+        if incremental and not force and weather_file.exists():
+            existing_weather = pd.read_csv(weather_file)
+            weather_full = pd.concat([existing_weather, new_weather], ignore_index=True)
+        else:
+            weather_full = new_weather
         weather_full.to_csv(weather_file, index=False)
-        print(f"💾 Meteo: {len(weather_full)} gare → {weather_file}")
+        print(f"💾 Meteo: {len(weather_full)} gare totali → {weather_file}")
 
     if all_pits:
-        pits_full = pd.concat(all_pits, ignore_index=True)
+        new_pits = pd.concat(all_pits, ignore_index=True)
+        if incremental and not force and pits_file.exists():
+            existing_pits = pd.read_csv(pits_file)
+            pits_full = pd.concat([existing_pits, new_pits], ignore_index=True)
+        else:
+            pits_full = new_pits
         pits_full.to_csv(pits_file, index=False)
-        print(f"💾 Pit stops: {len(pits_full)} righe → {pits_file}")
+        print(f"💾 Pit stops: {len(pits_full)} righe totali → {pits_file}")
 
     print("\n✅ Download dati avanzati completato!")
 

@@ -70,7 +70,7 @@ Tutti i test devono passare. Se no, c'è un bug da fixare.
 
 ```bash
 git add .
-git commit -m "feat: initial project setup with Elo system and prediction model"
+git commit -m "feat: improvements"
 git push origin main
 ```
 

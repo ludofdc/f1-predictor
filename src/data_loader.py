@@ -202,9 +202,12 @@ def get_season_results(year: int) -> pd.DataFrame:
                 if race_data is not None:
                     all_races.append(race_data)
                     print(f"📋 {len(race_data)} piloti (da qualifica, gara non ancora avvenuta)")
+                    # Gara non corsa → le successive saranno uguali, stop stagione
+                    print(f"  ⏩ Gara non ancora corsa → skip resto stagione {year}")
+                    break
                 else:
-                    print("⚠️ Nessun dato disponibile, skip")
-                continue
+                    print("⚠️ Nessun dato disponibile → skip resto stagione")
+                    break
 
             # Creiamo un DataFrame pulito con solo le colonne che ci servono
             race_data = pd.DataFrame(
@@ -389,7 +392,8 @@ def get_qualifying_results(year: int) -> pd.DataFrame:
             results = session.results
 
             if results is None or results.empty:
-                continue
+                # Qualifica non disponibile → gara futura, stop stagione
+                break
 
             quali_data = pd.DataFrame(
                 {
@@ -415,7 +419,7 @@ def get_qualifying_results(year: int) -> pd.DataFrame:
     return pd.concat(all_quali, ignore_index=True)
 
 
-def load_all_data(force_download: bool = False) -> pd.DataFrame:
+def load_all_data(force_download: bool = False, incremental: bool = False) -> pd.DataFrame:
     """
     Funzione principale: carica tutti i dati.
 
@@ -424,6 +428,8 @@ def load_all_data(force_download: bool = False) -> pd.DataFrame:
 
     Parametri:
         force_download: se True, riscarica tutto anche se il file esiste
+        incremental: se True, scarica SOLO le gare nuove/mancanti e le appende
+                     al CSV esistente. Molto più veloce di force_download=True.
 
     Ritorna:
         DataFrame completo con tutti i risultati di tutte le stagioni.
@@ -433,11 +439,118 @@ def load_all_data(force_download: bool = False) -> pd.DataFrame:
     output_file = PROCESSED_DATA_DIR / "all_races.csv"
 
     # Se il file esiste già e non vogliamo forzare il download, carichiamo quello
-    if output_file.exists() and not force_download:
+    if output_file.exists() and not force_download and not incremental:
         print(f"📂 Caricamento dati da {output_file}...")
         return pd.read_csv(output_file)
 
-    # Altrimenti, scarichiamo tutto
+    # === MODALITÀ INCREMENTALE ===
+    # Legge il CSV esistente, trova quali gare mancano, scarica solo quelle
+    if incremental and output_file.exists():
+        print("🔄 Aggiornamento INCREMENTALE dei dati F1...")
+        existing_df = pd.read_csv(output_file)
+
+        # Trova le coppie (year, round) già presenti
+        existing_races = set(
+            zip(existing_df["year"].astype(int), existing_df["round"].astype(int))
+        )
+        print(f"   📂 Gare già in cache: {len(existing_races)}")
+
+        # Trova le gare disponibili ma non ancora scaricate
+        new_data = []
+        new_quali = []
+        races_checked = 0
+
+        for year in SEASONS:
+            schedule = fastf1.get_event_schedule(year)
+            races = schedule[schedule["RoundNumber"] > 0]
+
+            season_break = False  # Se True, le gare successive di questa stagione non esistono ancora
+
+            for _, race_info in races.iterrows():
+                if season_break:
+                    break
+
+                round_num = int(race_info["RoundNumber"])
+
+                if (year, round_num) in existing_races:
+                    # Controlla se la gara esistente era "Not Yet Raced" e ora ha risultati
+                    mask = (existing_df["year"] == year) & (existing_df["round"] == round_num)
+                    race_rows = existing_df[mask]
+                    if race_rows["status"].eq("Not Yet Raced").any():
+                        # Questa gara potrebbe essere stata corsa — riscaricala
+                        print(f"  🔄 {year} R{round_num}: {race_info['EventName']} "
+                              f"(era provvisoria, riprovo)...", end=" ")
+                        try:
+                            session = fastf1.get_session(year, round_num, "R")
+                            session.load()
+                            results = session.results
+                            if results is not None and not results.empty:
+                                # Ha risultati reali — rimuovi i vecchi dati provvisori
+                                existing_df = existing_df[~mask]
+                                existing_races.discard((year, round_num))
+                                # Scarica come nuova
+                            else:
+                                print("⏳ ancora non corsa → skip resto stagione")
+                                season_break = True
+                                continue
+                        except Exception:
+                            print("⏳ ancora non corsa → skip resto stagione")
+                            season_break = True
+                            continue
+                    else:
+                        continue  # Gara già presente con dati reali, skip
+
+                races_checked += 1
+
+                # Scarica la gara mancante
+                race_df = get_season_results_single(year, round_num, race_info["EventName"])
+                if race_df is not None and not race_df.empty:
+                    # Se la gara non ha dati reali (status = "Not Yet Raced"), ferma la stagione
+                    if race_df["status"].eq("Not Yet Raced").any():
+                        new_data.append(race_df)
+                        print(f"  ⏩ Gara non ancora corsa → skip resto stagione {year}")
+                        season_break = True
+                        continue
+
+                    new_data.append(race_df)
+
+                    # Scarica anche la qualifica
+                    quali_df = get_qualifying_results_single(year, round_num)
+                    if quali_df is not None and not quali_df.empty:
+                        new_quali.append(quali_df)
+                else:
+                    # Nessun dato disponibile = gara futura → stop stagione
+                    print(f"  ⏩ Nessun dato per R{round_num} → skip resto stagione {year}")
+                    season_break = True
+
+        if not new_data:
+            print("   ✅ Nessuna gara nuova da scaricare. Dati già aggiornati!")
+            return existing_df
+
+        # Appendi i nuovi dati a quelli esistenti
+        new_df = pd.concat(new_data, ignore_index=True)
+        if new_quali:
+            quali_full = pd.concat(new_quali, ignore_index=True)
+            new_df = new_df.merge(
+                quali_full, on=["year", "round", "driver"], how="left"
+            )
+
+        # Assicura che le colonne combacino (se existing_df ha quali_position e new no, o viceversa)
+        full_df = pd.concat([existing_df, new_df], ignore_index=True)
+
+        # Ordiniamo
+        full_df = full_df.sort_values(
+            ["year", "round", "finish_position"]
+        ).reset_index(drop=True)
+
+        # Salviamo
+        full_df.to_csv(output_file, index=False)
+        print(f"\n💾 Dati aggiornati: +{len(new_df)} righe nuove "
+              f"({full_df.groupby(['year','round']).ngroups} gare totali)")
+
+        return full_df
+
+    # === DOWNLOAD COMPLETO (force_download o prima volta) ===
     print("🔄 Download completo dei dati F1...")
     print(f"   Stagioni: {SEASONS}")
 
@@ -481,6 +594,93 @@ def load_all_data(force_download: bool = False) -> pd.DataFrame:
     print(f"   Totale: {len(full_df)} righe")
 
     return full_df
+
+
+def get_season_results_single(year: int, round_num: int, race_name: str) -> pd.DataFrame:
+    """
+    Scarica i risultati di UNA SINGOLA gara (usata dall'aggiornamento incrementale).
+
+    A differenza di get_season_results che itera su tutta la stagione,
+    questa funzione scarica solo la gara specificata.
+    """
+    try:
+        print(f"  🏁 {year} R{round_num}: {race_name}...", end=" ")
+
+        session = fastf1.get_session(year, round_num, "R")
+        session.load()
+        results = session.results
+
+        if results is None or results.empty:
+            # Gara non ancora avvenuta — prova dalla qualifica
+            race_data = _try_create_from_qualifying(year, round_num, race_name)
+            if race_data is not None:
+                print(f"📋 {len(race_data)} piloti (da qualifica)")
+                return race_data
+            else:
+                print("⚠️ Nessun dato disponibile")
+                return pd.DataFrame()
+
+        race_data = pd.DataFrame(
+            {
+                "year": year,
+                "round": round_num,
+                "race_name": race_name,
+                "driver": results["Abbreviation"],
+                "driver_full_name": results["FullName"],
+                "team": results["TeamName"],
+                "grid_position": results["GridPosition"],
+                "finish_position": results["Position"],
+                "points": results["Points"],
+                "status": results["Status"],
+                "classified_position": results["ClassifiedPosition"],
+            }
+        )
+
+        race_data["grid_position"] = pd.to_numeric(
+            race_data["grid_position"], errors="coerce"
+        )
+        race_data["finish_position"] = pd.to_numeric(
+            race_data["finish_position"], errors="coerce"
+        )
+        race_data["dnf"] = ~race_data["status"].str.contains(
+            r"Finished|\+\d+ Lap", case=False, na=True
+        )
+
+        print(f"✅ {len(race_data)} piloti")
+        return race_data
+
+    except Exception as e:
+        print(f"❌ Errore: {e}")
+        return pd.DataFrame()
+
+
+def get_qualifying_results_single(year: int, round_num: int) -> pd.DataFrame:
+    """
+    Scarica i risultati qualifica di UNA SINGOLA gara (per update incrementale).
+    """
+    try:
+        session = fastf1.get_session(year, round_num, "Q")
+        session.load()
+        results = session.results
+
+        if results is None or results.empty:
+            return pd.DataFrame()
+
+        quali_data = pd.DataFrame(
+            {
+                "year": year,
+                "round": round_num,
+                "driver": results["Abbreviation"],
+                "quali_position": results["Position"],
+            }
+        )
+        quali_data["quali_position"] = pd.to_numeric(
+            quali_data["quali_position"], errors="coerce"
+        )
+        return quali_data
+
+    except Exception:
+        return pd.DataFrame()
 
 
 # ============================================================
